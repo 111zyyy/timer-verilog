@@ -1,0 +1,10 @@
+*.vvp
+*.lxt
+*.lxt2
+*.fst
+*.bak
+*~
+*.qws
+db/
+incremental_db/
+simulation/
