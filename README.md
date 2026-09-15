@@ -301,19 +301,32 @@ file name.
 ## Waveform captures
 
 Both testbenches call `$dumpvars` on their whole scope, so every internal signal is available in the
-VCD. Each testbench additionally declares a set of top-level observation wires — these are the most
-useful signals to plot:
+VCD. All three captures below plot the same signal set:
 
-| Observation wire | Width | Meaning |
+`clk_1khz`, `reset`, `start_h`/`start_l`, `end_h`/`end_l`, `in_range`, `is_error`, `auto_load`,
+`reset_total`, `timer_h`/`timer_l`, `timer_reset_s`, `led_cnt`, `led_sig`, `led_out`
+
+These map onto the observation wires declared by the testbenches as follows:
+
+| Signal | Width | Meaning |
 | --- | --- | --- |
+| `clk_1khz` | 1 | The 1 kHz clock — the reference for reading every other trace |
+| `reset` | 1 | External reset input, active high |
 | `start_h`, `start_l`, `end_h`, `end_l` | 4 each | The programmed window, in BCD |
 | `timer_h`, `timer_l` | 4 each | The live countdown value, in BCD |
 | `in_range` | 1 | High while the countdown is inside `[end, start]` |
-| `led_sig` | 8 | The marquee pattern: exactly one bit low while `in_range`, all ones outside |
-| `led_cnt` | 3 | Marquee step counter (advances once per 10 Hz tick) |
-| `is_error` | 1 | High when the programmed window is unreachable |
-| `auto_load` / `reset_total` | 1 each | The reload request and the gated active-low preset |
-| `timer_reset_s` | 1 | Rollover pulse asserted while the countdown reads `00` |
+| `is_error` | 1 | High when the programmed window is unreachable (`start < end`) |
+| `auto_load` | 1 | The unreachable-window reload request (equals `is_error`) |
+| `reset_total` | 1 | The gated active-low preset, `~(auto_load \| reset \| timer_reset)` |
+| `timer_reset_s` | 1 | Rollover pulse, asserted while the countdown reads `00` |
+| `led_cnt` | 3 | Marquee step counter — advances once per 10 Hz tick, only while `in_range` |
+| `led_sig` | 8 | Marquee pattern, active low: one bit at 0 while `in_range`, all ones outside |
+| `led_out` | 8 | `~led_sig`, active high — a bit is 1 where an LED is lit |
+
+Two conventions make the LED buses easy to read: `led_sig` is the internal active-low pattern (one
+walking zero inside the window) and `led_out` is its inverse, which is what actually drives the LEDs
+(one walking one). When the marquee is stopped, `led_sig` is `11111111` and `led_out` is `00000000` —
+every LED dark.
 
 ### Reading the timing
 
@@ -322,60 +335,67 @@ logical countdown second is 1000 clocks (10 µs of simulated time), and the marq
 100 clocks (1 µs of simulated time). So a trace showing the countdown stepping from one BCD value to
 the next is 10 µs wide, and eight marquee positions occupy 8 µs.
 
-### 1. Normal countdown and window entry — `wave_normal1.png`
+### 1. Marquee start and stop — `wave_normal1.png`
 
-![Normal countdown entering the legal window](wave_normal1.png)
+![in_range rising at 55 and falling as the countdown passes 37](wave_normal1.png)
 
-**Scenario:** the legal window `start=55, end=37` is programmed, then the countdown crosses it while
-the marquee is active.
+**Scenario:** the legal window `start=55, end=37`. This is the capture that shows `in_range` going
+0 → 1 → 0 together with the LED response.
 
 | Time | Event | Observable |
 | --- | --- | --- |
-| 24.497 µs | Window programmed to `start=55, end=37` | `start_h/l=55`, `end_h/l=37`, `in_range=0` |
-| 54.497 µs | Countdown reaches 55 — **window entry** | `in_range` rises, `led_sig` leaves `11111111` and the marquee starts |
-| 84.497 µs | Countdown at 52 | `in_range=1`, marquee has advanced |
-| 234.497 µs | Countdown reaches 37 — window edge | Last cycle with `in_range=1` |
-| 254.497 µs | Countdown at 35 — **window exit** | `in_range` falls, `led_sig` returns to `11111111`, `led_cnt` resets |
+| 24.497 µs | Window programmed to `start=55, end=37` | `start_h/l=55`, `end_h/l=37`, `in_range=0`, `led_sig=11111111` |
+| 54.497 µs | Countdown reaches 55 — **window entry** | `in_range` rises; `led_sig` leaves `11111111` and `led_cnt` starts advancing |
+| 84.497 µs | Countdown at 52 | `in_range=1`, marquee has stepped away from its start position |
+| 234.497 µs | Countdown at 37 — the window's end value | Still `in_range=1` on this cycle |
+| 254.497 µs | Countdown at 35 — **window exit** | `in_range` falls; `led_cnt` resets, `led_sig` returns to `11111111`, `led_out` to `00000000` |
 
-**What to look for:** `in_range` should be high for exactly the 18 seconds between 55 and 37, and
-`led_sig` should show a single walking zero during that interval and all ones outside it.
+**What to look for:** `in_range` is high for every countdown value from 55 down to 37 inclusive, and
+low from 36 downward. While it is high, `led_sig` holds a single walking zero (mirrored by a single 1
+in `led_out`) and `led_cnt` counts up. As soon as the countdown passes the end value the marquee
+counter resets and the LEDs go dark — the blanking is driven by the window test alone and does not
+wait for the countdown to reach `00`.
 
 ### 2. Rollover and reload — `wave_normal2.png`
 
-![Countdown rollover, reload and the start of the second cycle](wave_normal2.png)
+![timer_reset_s pulsing as the countdown rolls from 00 back to 60](wave_normal2.png)
 
-**Scenario:** the countdown runs all the way down to `00` and the automatic reload back to 60.
+**Scenario:** the same legal window, watched as the countdown reaches `00` and reloads. This is the
+capture that shows the `00 → 60` transition and the `timer_reset_s` pulse that causes it.
 
 | Time | Event | Observable |
 | --- | --- | --- |
-| 604.497 µs | Countdown reads `00` | `timer_h/l=00`, `timer_reset_s` asserts |
-| 604.497 µs | The NOR3 gate responds | `reset_total` is pulled low |
-| 614.497 µs | Counter presets to 60 and resumes | `timer_h/l=60`, then `59` on the next tick |
+| 604.497 µs | Countdown reaches `00` | `timer_reset_s` asserts and `reset_total` is pulled low; the counter is preset to `60` on the very next clock edge, so the phase snapshot printed at this timestamp already reads `60` |
+| 614.497 µs | One countdown second later | `timer_h/l=59` — counting has resumed normally |
 | 644.497 µs | Second cycle under way | Countdown continues past `56` |
 
-**What to look for:** the `00 → 60` transition happens in a single clock — `timer_reset_s` going high
-drives `reset_total` low, and the counter is preset synchronously rather than sitting at zero for a
-whole second.
+**What to look for:** the `00` state is short-lived, which is the point of this capture. `timer_reset_s`
+is combinational on the countdown reading `00`, so it stays high for exactly one clock period (1 µs out
+of the 10 µs countdown step) before the preset lands — **zoom in to see the pulse**. `in_range` stays
+low throughout, because the window is `[37, 55]` and neither `60` nor `00` lies inside it; that is why
+`led_sig` remains all ones here.
 
-### 3. Unreachable window and the `Er` display — `wave_error.png`
+### 3. Unreachable window — `wave_error.png`
 
-![Illegal window: Er display and blanked LEDs](wave_error.png)
+![is_error high: the countdown is held at 60 and the LED bus is blanked](wave_error.png)
 
-**Scenario:** the wide legal window `[45, 55]` is exercised first, then the illegal window
-`start=10, end=30` is programmed, which is the `start < end` case.
+**Scenario:** the illegal window `start=10, end=30` — the `start < end` case. The earlier phases of
+the same testbench provide context, but this capture is centred on the region where `is_error=1`.
 
 | Time | Event | Observable |
 | --- | --- | --- |
-| 24.407 µs | Legal window `start=55, end=45` programmed | `is_error=0` |
-| 74.407 µs | Window entered | `in_range=1`, marquee running |
-| 174.407 µs | Window exited while counting | `in_range=0`, LEDs blanked |
-| 624.407 µs | Countdown reaches `00` and reloads | `timer_reset_s` pulse, back to `60` |
-| 636.137 µs | Illegal window `start=10, end=30` programmed | **`is_error` rises**, `auto_load` follows it |
-| 686.137 µs | Er state held | `is_error=1`, `in_range=0`, `led_sig=11111111`, `timer` held at `60` |
+| 24.407 µs | *(context)* legal window `start=55, end=45` programmed | `is_error=0` |
+| 74.407 µs | *(context)* window entered, marquee running | `in_range=1` |
+| 624.407 µs | *(context)* countdown reaches `00` and reloads | `timer_reset_s` pulse, back to `60` |
+| 636.137 µs | Illegal window `start=10, end=30` programmed | **`is_error` rises**; `auto_load` follows it |
+| 636.137 µs onward | `auto_load` reaches the NOR3 gate | `reset_total` held low for as long as the illegal window stands |
+| 686.137 µs | Held to the end of the run | `is_error=1`, `in_range=0`, `timer_h/l=60` frozen, `led_sig=11111111` / `led_out=00000000` |
 
-**What to look for:** once `is_error` is high, the countdown is frozen at 60 (the preset is asserted
-continuously through the NOR3 gate), `in_range` stays low so the LEDs remain blanked, and the
-countdown digit outputs carry the hard-coded `E` / `r` segments instead of a number.
+**What to look for:** `is_error` high with `auto_load` following it, and `reset_total` pinned low
+throughout. Because here the preset is asserted continuously rather than as a single pulse,
+`timer_h`/`timer_l` stay frozen at `6`/`0` instead of counting down. `in_range` never rises, so the
+marquee stays stopped and the whole LED bus stays dark, and the countdown digit outputs carry the
+hard-coded `E` / `r` segments instead of a number.
 
 The raw data behind these screenshots is in `tb_timer_top_normal.vcd`,
 `tb_timer_top_error.vcd` and `tb_timer_top.vcd`; they can be opened directly in GTKWave.
